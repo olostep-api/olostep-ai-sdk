@@ -24,13 +24,13 @@ Get an API key at [olostep.com/auth](https://olostep.com/auth) and set it as `OL
 ## Usage
 
 ```ts
-import { generateText, isStepCount } from 'ai';
+import { generateText, stepCountIs } from 'ai';
 import { olostepTools } from '@olostep/ai-sdk';
 
 const { text } = await generateText({
   model: 'openai/gpt-5-mini',
   tools: olostepTools(),
-  stopWhen: isStepCount(5),
+  stopWhen: stepCountIs(5),
   prompt: 'Read the Next.js 15 release notes and list the breaking changes, with sources.',
 });
 
@@ -78,7 +78,7 @@ olostepTools({
 
 Page content goes to the model, so large jobs return their pages a set at a time. If a job is still running when the wait ends, the tool returns its `id` with `status` set to `in_progress`. If more pages are available, the result includes `nextCursor`. Pass the `id` and `nextCursor` to `olostepResults` to get the next pages, until you have every page.
 
-New accounts are limited to 100 URLs per batch: contact info@olostep.com to lift this.
+Batches go up to 100k URLs. New accounts start at 100 URLs per batch, and info@olostep.com can lift this.
 
 ## Examples
 

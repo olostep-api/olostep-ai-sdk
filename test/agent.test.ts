@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { test } from 'node:test';
-import { generateText, isStepCount } from 'ai';
+import { generateText, stepCountIs } from 'ai';
 import { MockLanguageModelV4 } from 'ai/test';
 import { olostepTools } from '../src/index.js';
 
@@ -36,7 +36,7 @@ test('an agent can call a tool and use its result', async () => {
   const { text, steps } = await generateText({
     model,
     tools: olostepTools({ apiKey: 'test-key', apiBaseUrl }),
-    stopWhen: isStepCount(3),
+    stopWhen: stepCountIs(3),
     prompt: 'Find Olostep',
   });
 
