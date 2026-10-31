@@ -23,7 +23,7 @@ const map = await run('map', { url: 'https://docs.olostep.com', topN: 5 });
 console.log('map:', map.urls);
 
 const crawl = await run('crawl', { url: 'https://docs.olostep.com', maxPages: 2 });
-console.log('crawl:', crawl.pages.map((p: { url: string; markdown: string }) => `${p.url} (${p.markdown.length} chars)`));
+console.log('crawl:', (crawl.pages ?? []).map((p: { url: string; markdown: string }) => `${p.url} (${p.markdown.length} chars)`));
 
 const batch = await run('batch', { urls: ['https://docs.olostep.com', 'https://www.olostep.com'] });
-console.log('batch:', batch.pages.map((p: { url: string; markdown: string }) => `${p.url} (${p.markdown.length} chars)`));
+console.log('batch:', (batch.pages ?? []).map((p: { url: string; markdown: string }) => `${p.url} (${p.markdown.length} chars)`));

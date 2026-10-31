@@ -9,22 +9,112 @@ export interface OlostepToolOptions {
   maxCharacters?: number;
   /** How long crawl and batch tools wait for the job to finish, in seconds. Default: 300. */
   timeoutSeconds?: number;
+  /** How many pages crawl, batch and results tools return per call, up to 100. Default: 20. */
+  pagesPerCall?: number;
+  /** Olostep API base URL. Default: https://api.olostep.com/v1. */
+  apiBaseUrl?: string;
 }
 
 const DEFAULT_MAX_CHARACTERS = 20_000;
 const DEFAULT_TIMEOUT_SECONDS = 300;
+const DEFAULT_PAGES_PER_CALL = 20;
+const MAX_PAGES_PER_CALL = 100;
+const MAX_JOB_SIZE = 100_000;
+const API_URL = 'https://api.olostep.com/v1';
+
+type JobKind = 'batches' | 'crawls';
+
+interface PageResult {
+  url: string;
+  markdown: string;
+  error?: string;
+}
+
+interface JobResult {
+  id: string;
+  status: string;
+  pages?: PageResult[];
+  nextCursor?: string;
+  message?: string;
+}
 
 function waitOptions(options: OlostepToolOptions) {
   return { checkEveryNSecs: 5, timeoutSeconds: options.timeoutSeconds ?? DEFAULT_TIMEOUT_SECONDS };
 }
 
 function client(options: OlostepToolOptions): Olostep {
-  return new Olostep({ apiKey: options.apiKey });
+  return new Olostep({ apiKey: options.apiKey, apiBaseUrl: options.apiBaseUrl });
 }
 
 function truncate(text: string | undefined | null, max: number): string {
   if (!text) return '';
   return text.length > max ? `${text.slice(0, max)}\n\n[truncated]` : text;
+}
+
+function stillRunning(id: string): JobResult {
+  return {
+    id,
+    status: 'in_progress',
+    message: 'Still running. Use the results tool with this id in a few minutes.',
+  };
+}
+
+// Returns one page of a finished job. The SDK iterators hide the cursor, so this calls the API directly.
+async function readPages(options: OlostepToolOptions, kind: JobKind, id: string, cursor?: string): Promise<JobResult> {
+  const olostep = client(options);
+  const info = (await olostep[kind].info(id)) as { status?: string };
+  if (info.status === 'in_progress') return stillRunning(id);
+
+  const limit = Math.max(1, Math.min(options.pagesPerCall ?? DEFAULT_PAGES_PER_CALL, MAX_PAGES_PER_CALL));
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (kind === 'batches') params.set('status', 'completed');
+  if (cursor) params.set('cursor', cursor);
+  const path = kind === 'batches' ? 'items' : 'pages';
+  const response = await fetch(`${options.apiBaseUrl ?? API_URL}/${kind}/${id}/${path}?${params}`, {
+    headers: { Authorization: `Bearer ${options.apiKey ?? process.env.OLOSTEP_API_KEY}` },
+  });
+  if (!response.ok) throw new Error(`Olostep API error (HTTP ${response.status}) while listing ${id}`);
+  const data = (await response.json()) as {
+    items?: { url?: string; retrieve_id?: string }[];
+    pages?: { url?: string; retrieve_id?: string }[];
+    cursor?: string | number | null;
+  };
+
+  const max = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
+  const found = data.items ?? data.pages ?? [];
+  const pages = await Promise.all(
+    found.map(async ({ url = '', retrieve_id: retrieveId }): Promise<PageResult> => {
+      if (!retrieveId) return { url, markdown: '', error: 'No content is available for this page.' };
+      try {
+        const content = await olostep.retrieve.get({ retrieveId, formats: [Format.MARKDOWN] });
+        return { url, markdown: truncate(content.markdown_content, max) };
+      } catch (error) {
+        return { url, markdown: '', error: error instanceof Error ? error.message : String(error) };
+      }
+    }),
+  );
+
+  const result: JobResult = { id, status: info.status ?? 'completed', pages };
+  if (found.length === limit && data.cursor !== undefined && data.cursor !== null) {
+    result.nextCursor = String(data.cursor);
+    result.message = 'More pages are available. Use the results tool with this id and nextCursor.';
+  }
+  return result;
+}
+
+// waitTillDone throws when the time runs out, which is normal for a large job.
+async function waitThenRead(
+  options: OlostepToolOptions,
+  kind: JobKind,
+  job: { id: string; waitTillDone: (wait: ReturnType<typeof waitOptions>) => Promise<void> },
+): Promise<JobResult> {
+  try {
+    await job.waitTillDone(waitOptions(options));
+  } catch (error) {
+    if (error instanceof Error && error.message.includes('timed out')) return stillRunning(job.id);
+    throw error;
+  }
+  return readPages(options, kind, job.id);
 }
 
 // The API returns the answer as a JSON string, usually {"result": "..."}.
@@ -73,7 +163,7 @@ export const olostepSearch = (options: OlostepToolOptions = {}) =>
       'Search the live web. Returns result titles, URLs and descriptions. Use to find current information or sources to scrape.',
     inputSchema: z.object({
       query: z.string().describe('The search query'),
-      limit: z.number().int().min(1).max(20).optional().describe('Maximum number of results (default 10)'),
+      limit: z.number().int().min(1).max(25).optional().describe('Maximum number of results, up to 25 (default 10)'),
     }),
     execute: async ({ query, limit }) => {
       const result = await client(options).searches.create({ query, limit });
@@ -110,7 +200,7 @@ export const olostepMap = (options: OlostepToolOptions = {}) =>
     inputSchema: z.object({
       url: z.string().url().describe('The website to map'),
       searchQuery: z.string().optional().describe('Rank URLs by relevance to this query'),
-      topN: z.number().int().min(1).max(500).optional().describe('Maximum number of URLs to return'),
+      topN: z.number().int().min(1).max(MAX_JOB_SIZE).optional().describe('Maximum number of URLs to return, up to 100k'),
     }),
     execute: async ({ url, searchQuery, topN }) => {
       const result = await client(options).maps.create({ url, searchQuery, topN });
@@ -124,10 +214,10 @@ export const olostepMap = (options: OlostepToolOptions = {}) =>
 export const olostepCrawl = (options: OlostepToolOptions = {}) =>
   tool({
     description:
-      'Crawl a website from a starting URL and return the markdown content of each page found. Use to read several pages of a site, such as documentation.',
+      'Crawl a website from a starting URL and return the markdown content of each page found. Use to read several pages of a site, such as documentation. Large crawls return an id or nextCursor: use the results tool to get the remaining pages.',
     inputSchema: z.object({
       url: z.string().url().describe('The URL to start crawling from'),
-      maxPages: z.number().int().min(1).max(25).optional().describe('Maximum pages to crawl (default 5)'),
+      maxPages: z.number().int().min(1).max(MAX_JOB_SIZE).optional().describe('Maximum pages to crawl, up to 100k (default 5)'),
       includeUrls: z
         .array(z.string())
         .optional()
@@ -136,16 +226,7 @@ export const olostepCrawl = (options: OlostepToolOptions = {}) =>
     execute: async ({ url, maxPages, includeUrls }) => {
       const olostep = client(options);
       const crawl = await olostep.crawls.create({ url, maxPages: maxPages ?? 5, includeUrls });
-      await crawl.waitTillDone(waitOptions(options));
-
-      const max = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
-      const pages: { url: string; markdown: string }[] = [];
-      for await (const page of crawl.pages()) {
-        if (!page.retrieve_id) continue;
-        const content = await olostep.retrieve.get({ retrieveId: page.retrieve_id, formats: [Format.MARKDOWN] });
-        pages.push({ url: page.url ?? '', markdown: truncate(content.markdown_content, max) });
-      }
-      return { url, pages };
+      return waitThenRead(options, 'crawls', crawl);
     },
   });
 
@@ -153,23 +234,30 @@ export const olostepCrawl = (options: OlostepToolOptions = {}) =>
 export const olostepBatch = (options: OlostepToolOptions = {}) =>
   tool({
     description:
-      'Scrape several URLs in one batch and return the markdown of each page. Use when you already have a list of URLs to read; for one or two URLs use the scrape tool instead. Can take a minute or more.',
+      'Scrape up to 100k URLs in one batch and return the markdown of each page. Use when you already have a list of URLs to read; for one or two URLs use the scrape tool instead. Can take a minute or more. Large batches return an id or nextCursor: use the results tool to get the remaining pages.',
     inputSchema: z.object({
-      urls: z.array(z.string().url()).min(1).max(20).describe('The URLs to scrape (up to 20)'),
+      urls: z.array(z.string().url()).min(1).max(MAX_JOB_SIZE).describe('The URLs to scrape (up to 100k)'),
     }),
     execute: async ({ urls }) => {
       const olostep = client(options);
       const batch = await olostep.batches.create(urls);
-      await batch.waitTillDone(waitOptions(options));
+      return waitThenRead(options, 'batches', batch);
+    },
+  });
 
-      const max = options.maxCharacters ?? DEFAULT_MAX_CHARACTERS;
-      const pages: { url: string; markdown: string }[] = [];
-      for await (const item of batch.items()) {
-        if (!item.retrieve_id) continue;
-        const content = await olostep.retrieve.get({ retrieveId: item.retrieve_id, formats: [Format.MARKDOWN] });
-        pages.push({ url: item.url, markdown: truncate(content.markdown_content, max) });
-      }
-      return { pages };
+/** Get the pages of a crawl or batch by its id, a set at a time. */
+export const olostepResults = (options: OlostepToolOptions = {}) =>
+  tool({
+    description:
+      'Get the markdown pages of a crawl or batch by its id (crawl_... or batch_...). Use when the crawl or batch tool returned status in_progress or a nextCursor.',
+    inputSchema: z.object({
+      id: z.string().describe('The crawl or batch id, starting with crawl_ or batch_'),
+      cursor: z.string().optional().describe('The nextCursor from a previous result. Leave empty for the first pages.'),
+    }),
+    execute: async ({ id, cursor }) => {
+      const kind: JobKind | null = id.startsWith('batch_') ? 'batches' : id.startsWith('crawl_') ? 'crawls' : null;
+      if (!kind) throw new Error(`Enter a crawl or batch id, for example crawl_abc123 or batch_abc123 (got ${id}).`);
+      return readPages(options, kind, id, cursor);
     },
   });
 
@@ -181,4 +269,5 @@ export const olostepTools = (options: OlostepToolOptions = {}) => ({
   map: olostepMap(options),
   crawl: olostepCrawl(options),
   batch: olostepBatch(options),
+  results: olostepResults(options),
 });
