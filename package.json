@@ -1,6 +1,6 @@
 {
   "name": "@olostep/ai-sdk",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Olostep tools for the Vercel AI SDK. Live web search, scraping and crawling API for AI. Get structured, LLM-ready data from any site. Scale to 1M requests with 10 parallel batches at low cost.",
   "type": "module",
   "main": "./dist/index.js",

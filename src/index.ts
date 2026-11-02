@@ -95,7 +95,8 @@ async function readPages(options: OlostepToolOptions, kind: JobKind, id: string,
   );
 
   const result: JobResult = { id, status: info.status ?? 'completed', pages };
-  if (found.length === limit && data.cursor !== undefined && data.cursor !== null) {
+  // The API returns a cursor until the listing is exhausted, which can end on an empty page.
+  if (found.length > 0 && data.cursor !== undefined && data.cursor !== null) {
     result.nextCursor = String(data.cursor);
     result.message = 'More pages are available. Use the results tool with this id and nextCursor.';
   }

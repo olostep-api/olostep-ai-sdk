@@ -134,7 +134,8 @@ test('a full page returns nextCursor and the results tool continues from it', as
   const calls = mockApi(
     finishedBatch(url => {
       const cursor = Number(url.searchParams.get('cursor') ?? 0);
-      return cursor === 0 ? { items: items(2), cursor: 2 } : { items: items(1, 2), cursor: 3 };
+      if (cursor === 0) return { items: items(2), cursor: 2 };
+      return cursor === 2 ? { items: items(1, 2), cursor: 3 } : { items: [] };
     }),
   );
   const first = await run(olostepResults(opts({ pagesPerCall: 2 })), { id: 'batch_1' });
@@ -143,8 +144,12 @@ test('a full page returns nextCursor and the results tool continues from it', as
 
   const second = await run(olostepResults(opts({ pagesPerCall: 2 })), { id: 'batch_1', cursor: first.nextCursor });
   assert.equal(second.pages[0].url, 'https://a.com/2');
-  assert.equal(second.nextCursor, undefined);
-  assert.equal(calls.filter(url => url.pathname.endsWith('/items')).at(-1)!.searchParams.get('cursor'), '2');
+  assert.equal(second.nextCursor, '3');
+
+  const third = await run(olostepResults(opts({ pagesPerCall: 2 })), { id: 'batch_1', cursor: second.nextCursor });
+  assert.deepEqual(third.pages, []);
+  assert.equal(third.nextCursor, undefined);
+  assert.deepEqual(calls.filter(url => url.pathname.endsWith('/items')).map(url => url.searchParams.get('cursor')), [null, '2', '3']);
 });
 
 test('pagesPerCall stays between 1 and 100', async () => {
